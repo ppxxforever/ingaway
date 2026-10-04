@@ -1,0 +1,23 @@
+menu "Environment sensors"
+
+config ENV_SDA_GPIO
+    int "I2C SDA GPIO"
+    range 0 48
+    default 8
+
+config ENV_SCL_GPIO
+    int "I2C SCL GPIO"
+    range 0 48
+    default 9
+
+config ENV_BMP280_ADDRESS
+    hex "BMP280 I2C address (0x76 or 0x77)"
+    range 0x76 0x77
+    default 0x77
+
+config ENV_SAMPLE_INTERVAL_MS
+    int "Sampling interval (ms)"
+    range 2000 60000
+    default 2000
+
+endmenu

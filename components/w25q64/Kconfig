@@ -1,0 +1,27 @@
+menu "External W25Q64 storage"
+
+config W25Q64_ENABLED
+    bool "Initialize W25Q64 at startup (no erase/format)"
+    default y
+
+config W25Q64_CS_GPIO
+    int "Chip select GPIO"
+    range 0 48
+    default 10
+
+config W25Q64_MOSI_GPIO
+    int "MOSI GPIO"
+    range 0 48
+    default 11
+
+config W25Q64_SCLK_GPIO
+    int "Clock GPIO"
+    range 0 48
+    default 12
+
+config W25Q64_MISO_GPIO
+    int "MISO GPIO"
+    range 0 48
+    default 13
+
+endmenu

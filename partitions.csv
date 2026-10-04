@@ -1,0 +1,10 @@
+# ESP32-S3 N16R8: 16 MiB Flash, 8 MiB PSRAM (not part of this table)
+# Name,     Type, SubType, Offset,   Size,     Flags
+nvs,        data, nvs,     0x9000,   0xD000,
+otadata,    data, ota,     0x16000,  0x2000,
+phy_init,   data, phy,     0x18000,  0x1000,
+ota_0,      app,  ota_0,   0x20000,  0x400000,
+ota_1,      app,  ota_1,   0x420000, 0x400000,
+storage,    data, spiffs,  0x820000, 0x600000,
+coredump,   data, coredump,0xE20000, 0x20000,
+# 0xE40000 .. 0xFFFFFF: 0x1C0000 (1.75 MiB) reserved for future partitions.
