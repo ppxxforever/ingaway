@@ -1,2 +1,5 @@
 build
 sdkconfig.old
+/.local/mqtt-pki/
+/components/mymqtt/certs/*.key
+/components/mymqtt/certs/*.new

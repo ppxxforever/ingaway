@@ -1,4 +1,4 @@
 idf_component_register(SRCS "wifi.c"
                     INCLUDE_DIRS "include"
-                    REQUIRES  blufi nvs_flash esp_wifi mymqtt 
+                    REQUIRES  blufi nvs_flash esp_wifi mymqtt modbusTCP w25q64 ota_service
                     )

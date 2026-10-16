@@ -44,9 +44,6 @@ esp_err_t w25q64_init(void)
     const int pins[] = {CONFIG_W25Q64_CS_GPIO, CONFIG_W25Q64_MOSI_GPIO,
                         CONFIG_W25Q64_SCLK_GPIO, CONFIG_W25Q64_MISO_GPIO};
     for (size_t i = 0; i < sizeof(pins) / sizeof(pins[0]); ++i) {
-        if (pins[i] == CONFIG_ENV_SDA_GPIO || pins[i] == CONFIG_ENV_SCL_GPIO) {
-            return ESP_ERR_INVALID_ARG;
-        }
         for (size_t j = i + 1; j < sizeof(pins) / sizeof(pins[0]); ++j) {
             if (pins[i] == pins[j]) return ESP_ERR_INVALID_ARG;
         }
@@ -88,13 +85,13 @@ esp_err_t w25q64_init(void)
     }
     /* Runtime external partitions are NOT entries in internal partitions.csv. */
     err = esp_partition_register_external(chip, 0, 0x600000, "ext_history",
-            ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_SPIFFS, &history);
+            ESP_PARTITION_TYPE_DATA, 0x41, &history);
     if (err != ESP_OK) goto fail;
     err = esp_partition_register_external(chip, 0x600000, 0x100000, "ext_cache",
-            ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_SPIFFS, &cache);
+            ESP_PARTITION_TYPE_DATA, 0x40, &cache);
     if (err != ESP_OK) goto fail;
     err = esp_partition_register_external(chip, 0x700000, 0x100000, "ext_logs",
-            ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_SPIFFS, &logs);
+            ESP_PARTITION_TYPE_DATA, 0x42, &logs);
     if (err != ESP_OK) goto fail;
     ready = true;
     ESP_LOGI(TAG, "ID=0x%06lx, 8 MiB: history 6 MiB, cache 1 MiB, logs 1 MiB",

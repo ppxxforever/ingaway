@@ -1,0 +1,31 @@
+menu "Ingaway HTTPS OTA"
+    config INGAWAY_OTA_ENABLED
+        bool "Enable S3 HTTPS OTA"
+        default y
+
+    config INGAWAY_OTA_URL
+        string "HTTPS firmware URL"
+        depends on INGAWAY_OTA_ENABLED
+        default "https://example.com/ingaway/esp32s3/ingaway.bin"
+        help
+            Direct HTTPS URL of the ESP32-S3 application .bin stored in S3/CloudFront.
+
+    config INGAWAY_OTA_PROJECT_NAME
+        string "Expected firmware project/model name"
+        depends on INGAWAY_OTA_ENABLED
+        default "ingaway"
+        help
+            The OTA image esp_app_desc.project_name must match this value.
+
+    config INGAWAY_OTA_REQUIRED_FLASH_MB
+        int "Required flash size in MiB"
+        depends on INGAWAY_OTA_ENABLED
+        range 4 128
+        default 16
+
+    config INGAWAY_OTA_CHECK_DELAY_MS
+        int "Delay after Wi-Fi got IP before OTA check"
+        depends on INGAWAY_OTA_ENABLED
+        range 0 600000
+        default 5000
+endmenu

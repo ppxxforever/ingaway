@@ -10,7 +10,12 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
+#include "nvs.h"
 #include "mymqtt.h"
+#include "modbusTCP.h"
+#include "wifi.h"
+#include "storage_archive.h"
+#include "ota_service.h"
 #if CONFIG_BT_CONTROLLER_ENABLED || !CONFIG_BT_NIMBLE_ENABLED
 #include "esp_bt.h"
 #endif
@@ -28,12 +33,15 @@
 #define INVALID_REASON                255
 #define INVALID_RSSI                  -128
 
-
+esp_netif_t * wifi_netif;
 static void event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_param_t *param);
 
 #define WIFI_LIST_NUM   10
 
 static wifi_config_t sta_config;
+static bool boot_with_saved_wifi;
+static bool force_provision;
+#define SAVED_WIFI_TIMEOUT_MS 30000
 
 /* FreeRTOS event group to signal when we are connected & ready to make a request */
 static EventGroupHandle_t wifi_event_group;
@@ -45,7 +53,8 @@ const int CONNECTED_BIT = BIT0;
 #define BLE_SHUTDOWN_REQUESTED_BIT BIT1
 #define BLE_DISCONNECTED_BIT       BIT2
 #define BLUFI_DEINITIALIZED_BIT    BIT3
-
+#define WIFI_AUTO_RECONNECT_BIT    BIT4
+#define WIFI_ASSOCIATED_BIT        BIT5
 static uint8_t wifi_retry = 0;
 
 /* store the station info for send back to phone */
@@ -135,7 +144,7 @@ static void record_wifi_conn_info(int rssi, uint8_t reason)
 
 /*
  * 真正发起 STA 连接。
- * 注意：只有在 BLUFI 已经收到 SSID/密码，并收到“连接 AP”请求后才应该调用。
+ * 用于开机连接 NVS 配置，或 BLUFI 完整配置提交后的连接。
  */
 static void wifi_connect(void)
 {
@@ -163,6 +172,30 @@ static bool wifi_reconnect(void)
 }
 
 
+/* Once provisioning succeeds, recover lost Wi-Fi even after BLE is shut down. */
+static void wifi_recovery_task(void *arg)
+{
+    unsigned no_ip_ms = 0;
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(10000));
+        EventBits_t bits = xEventGroupGetBits(wifi_event_group);
+        if (!(bits & WIFI_AUTO_RECONNECT_BIT) || (bits & CONNECTED_BIT)) {
+            no_ip_ms = 0;
+            continue;
+        }
+        if ((bits & WIFI_AUTO_RECONNECT_BIT) && !(bits & WIFI_ASSOCIATED_BIT)) {
+            no_ip_ms = 0;
+            esp_err_t err = esp_wifi_connect();
+            BLUFI_INFO("WiFi periodic reconnect: %s\n", esp_err_to_name(err));
+            storage_log(err==ESP_OK?STORAGE_DEBUG:STORAGE_WARN,"wifi","reconnect_attempt",err,0,"");
+        } else if ((no_ip_ms += 10000) >= 30000) {
+            /* Associated but DHCP/IP recovery stalled: reassociate after a grace period. */
+            no_ip_ms = 0;
+            esp_wifi_disconnect();
+        }
+    }
+}
+
 /*
  * IP 事件处理：STA 拿到 IP 后，说明配网真正成功。
  * 回报成功后请求关闭 BLE；后续再次获取 IP 不再访问已关闭的 BLUFI。
@@ -176,7 +209,7 @@ static void ip_event_handler(void* arg, esp_event_base_t event_base,
     case IP_EVENT_STA_GOT_IP: {
         esp_blufi_extra_info_t info;
 
-        xEventGroupSetBits(wifi_event_group, CONNECTED_BIT);
+        xEventGroupSetBits(wifi_event_group, CONNECTED_BIT | WIFI_AUTO_RECONNECT_BIT);
         esp_wifi_get_mode(&mode);
 
         memset(&info, 0, sizeof(esp_blufi_extra_info_t));
@@ -185,7 +218,13 @@ static void ip_event_handler(void* arg, esp_event_base_t event_base,
         info.sta_ssid = gl_sta_ssid;
         info.sta_ssid_len = gl_sta_ssid_len;
         gl_sta_got_ip = true;
+        storage_log(STORAGE_INFO,"wifi","got_ip",0,0,"");
+        modbusTCP_init(wifi_netif);
         mqtt_start();
+        esp_err_t ota_err = ota_service_start_once();
+        if (ota_err != ESP_OK) {
+            storage_log(STORAGE_WARN,"ota","start_failed",ota_err,0,"");
+        }
         if (!(xEventGroupGetBits(wifi_event_group) & BLE_SHUTDOWN_REQUESTED_BIT)) {
             if (ble_is_connected) {
                 esp_blufi_send_wifi_conn_report(mode, ESP_BLUFI_STA_CONN_SUCCESS, 0, &info);
@@ -194,6 +233,13 @@ static void ip_event_handler(void* arg, esp_event_base_t event_base,
         }
         break;
     }
+    case IP_EVENT_STA_LOST_IP:
+        storage_log(STORAGE_WARN,"wifi","lost_ip",0,0,"");
+        gl_sta_got_ip = false;
+        xEventGroupClearBits(wifi_event_group, CONNECTED_BIT);
+        modbusTCP_network_down();
+        mqtt_network_down();
+        break;
     default:
         break;
     }
@@ -212,12 +258,18 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
 
     switch (event_id) {
     case WIFI_EVENT_STA_START:
-        /* STA 已启动，但此时 BLUFI 还不一定收到 SSID/密码，所以这里不主动连接。 */
-        BLUFI_INFO("WiFi STA started, wait for BLUFI credentials\n");
+        if (boot_with_saved_wifi) {
+            BLUFI_INFO("Connecting with saved WiFi configuration\n");
+            wifi_connect();
+        } else {
+            BLUFI_INFO("WiFi STA started, waiting for BLUFI credentials\n");
+        }
         break;
     case WIFI_EVENT_STA_CONNECTED:
+        storage_log(STORAGE_INFO,"wifi","associated",0,0,"");
         /* 已经连上路由器 AP，但还不代表能上网；还要等 IP_EVENT_STA_GOT_IP。 */
         gl_sta_connected = true;
+        xEventGroupSetBits(wifi_event_group, WIFI_ASSOCIATED_BIT);
         gl_sta_is_connecting = false;
         event = (wifi_event_sta_connected_t*) event_data;
         memcpy(gl_sta_bssid, event->bssid, 6);
@@ -225,8 +277,13 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
         gl_sta_ssid_len = event->ssid_len;
         break;
     case WIFI_EVENT_STA_DISCONNECTED:
+        disconnected_event = (wifi_event_sta_disconnected_t*) event_data;
+        storage_log(STORAGE_WARN,"wifi","disconnected",disconnected_event->reason,0,"");
+        modbusTCP_network_down();
+        mqtt_network_down();
         /* STA 断开：如果当前处于连接流程中，则按最大次数重试。 */
-        if (gl_sta_connected == false && wifi_reconnect() == false) {
+        if (!(xEventGroupGetBits(wifi_event_group) & WIFI_AUTO_RECONNECT_BIT) &&
+            gl_sta_connected == false && wifi_reconnect() == false) {
             gl_sta_is_connecting = false;
             disconnected_event = (wifi_event_sta_disconnected_t*) event_data;
             record_wifi_conn_info(disconnected_event->rssi, disconnected_event->reason);
@@ -238,7 +295,7 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
         memset(gl_sta_ssid, 0, 32);
         memset(gl_sta_bssid, 0, 6);
         gl_sta_ssid_len = 0;
-        xEventGroupClearBits(wifi_event_group, CONNECTED_BIT);
+        xEventGroupClearBits(wifi_event_group, CONNECTED_BIT | WIFI_ASSOCIATED_BIT);
         break;
     case WIFI_EVENT_SCAN_DONE: {
         uint16_t apCount = 0;
@@ -286,26 +343,32 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
 
 /*
  * 初始化 Wi-Fi 子系统。
- * 这里只启动 Wi-Fi 和注册事件，不主动连接路由器；连接由 BLUFI 事件触发。
+ * 显式启用 FLASH 存储，读取已保存配置，再由 STA_START 发起历史网络连接。
  */
 static void initialise_wifi(void)
 {
     ESP_ERROR_CHECK(esp_netif_init());
     wifi_event_group = xEventGroupCreate();
+    ESP_ERROR_CHECK(wifi_event_group ? ESP_OK : ESP_ERR_NO_MEM);
     esp_err_t event_loop_ret = esp_event_loop_create_default();
     if (event_loop_ret != ESP_OK && event_loop_ret != ESP_ERR_INVALID_STATE) {
         ESP_ERROR_CHECK(event_loop_ret);
     }
-    esp_netif_t *sta_netif = esp_netif_create_default_wifi_sta();
-    assert(sta_netif);
-    esp_netif_t *ap_netif = esp_netif_create_default_wifi_ap();
-    assert(ap_netif);
+    wifi_netif = esp_netif_create_default_wifi_sta();
+    assert(wifi_netif);
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &ip_event_handler, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_LOST_IP, &ip_event_handler, NULL));
     
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK( esp_wifi_init(&cfg) );
+    ESP_ERROR_CHECK( esp_wifi_set_storage(WIFI_STORAGE_FLASH) );
     ESP_ERROR_CHECK( esp_wifi_set_mode(WIFI_MODE_STA) );
+    ESP_ERROR_CHECK( esp_wifi_get_config(WIFI_IF_STA, &sta_config) );
+    boot_with_saved_wifi = !force_provision && sta_config.sta.ssid[0] != '\0';
+    if (boot_with_saved_wifi) {
+        xEventGroupSetBits(wifi_event_group, WIFI_AUTO_RECONNECT_BIT);
+    }
     record_wifi_conn_info(INVALID_RSSI, INVALID_REASON);
     ESP_ERROR_CHECK( esp_wifi_start() );
 }
@@ -379,17 +442,29 @@ static void event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_param_t *par
         BLUFI_INFO("BLUFI Set WIFI opmode %d\n", param->wifi_mode.op_mode);
         ESP_ERROR_CHECK( esp_wifi_set_mode(param->wifi_mode.op_mode) );
         break;
-    case ESP_BLUFI_EVENT_REQ_CONNECT_TO_AP:
-        /* 手机明确要求连接路由器：此时 SSID/密码应该已经写入 sta_config。 */
+    case ESP_BLUFI_EVENT_REQ_CONNECT_TO_AP: {
+        /* Persist one complete configuration, not partial SSID/password events. */
         BLUFI_INFO("BLUFI request wifi connect to AP\n");
-        /* there is no wifi callback when the device has already connected to this wifi
-        so disconnect wifi before connection.
-        */
+        if (sta_config.sta.ssid[0] == '\0') {
+            esp_blufi_send_error_info(ESP_BLUFI_DATA_FORMAT_ERROR);
+            break;
+        }
+        xEventGroupClearBits(wifi_event_group, WIFI_AUTO_RECONNECT_BIT);
+        gl_sta_is_connecting = false;
         esp_wifi_disconnect();
+        esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &sta_config);
+        if (err != ESP_OK) {
+            BLUFI_ERROR("Cannot save WiFi configuration: %s\n", esp_err_to_name(err));
+            esp_blufi_send_error_info(ESP_BLUFI_MSG_STATE_ERROR);
+            break;
+        }
         wifi_connect();
         break;
+    }
     case ESP_BLUFI_EVENT_REQ_DISCONNECT_FROM_AP:
         BLUFI_INFO("BLUFI request wifi disconnect from AP\n");
+        xEventGroupClearBits(wifi_event_group, WIFI_AUTO_RECONNECT_BIT);
+        gl_sta_is_connecting = false;
         esp_wifi_disconnect();
         break;
     case ESP_BLUFI_EVENT_REPORT_ERROR:
@@ -426,11 +501,10 @@ static void event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_param_t *par
 	case ESP_BLUFI_EVENT_RECV_STA_BSSID:
         memcpy(sta_config.sta.bssid, param->sta_bssid.bssid, 6);
         sta_config.sta.bssid_set = 1;
-        esp_wifi_set_config(WIFI_IF_STA, &sta_config);
         BLUFI_INFO("Recv STA BSSID %s\n", sta_config.sta.ssid);
         break;
 	case ESP_BLUFI_EVENT_RECV_STA_SSID:
-        /* 手机下发路由器 SSID，保存到 sta_config 并写入 Wi-Fi STA 配置。 */
+        /* Stage fields in RAM; REQ_CONNECT_TO_AP commits them together. */
         if (param->sta_ssid.ssid_len >= sizeof(sta_config.sta.ssid)/sizeof(sta_config.sta.ssid[0])) {
             esp_blufi_send_error_info(ESP_BLUFI_DATA_FORMAT_ERROR);
             BLUFI_INFO("Invalid STA SSID\n");
@@ -438,11 +512,10 @@ static void event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_param_t *par
         }
         strncpy((char *)sta_config.sta.ssid, (char *)param->sta_ssid.ssid, param->sta_ssid.ssid_len);
         sta_config.sta.ssid[param->sta_ssid.ssid_len] = '\0';
-        esp_wifi_set_config(WIFI_IF_STA, &sta_config);
         BLUFI_INFO("Recv STA SSID %s\n", sta_config.sta.ssid);
         break;
 	case ESP_BLUFI_EVENT_RECV_STA_PASSWD:
-        /* 手机下发路由器密码，保存到 sta_config 并写入 Wi-Fi STA 配置。 */
+        /* Stage password without logging or persisting an incomplete config. */
         if (param->sta_passwd.passwd_len >= sizeof(sta_config.sta.password)/sizeof(sta_config.sta.password[0])) {
             esp_blufi_send_error_info(ESP_BLUFI_DATA_FORMAT_ERROR);
             BLUFI_INFO("Invalid STA PASSWORD\n");
@@ -450,9 +523,9 @@ static void event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_param_t *par
         }
         strncpy((char *)sta_config.sta.password, (char *)param->sta_passwd.passwd, param->sta_passwd.passwd_len);
         sta_config.sta.password[param->sta_passwd.passwd_len] = '\0';
-        sta_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
-        esp_wifi_set_config(WIFI_IF_STA, &sta_config);
-        BLUFI_INFO("Recv STA PASSWORD %s\n", sta_config.sta.password);
+        sta_config.sta.threshold.authmode = param->sta_passwd.passwd_len
+            ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
+        BLUFI_INFO("Received STA password\n");
         break;
 
     case ESP_BLUFI_EVENT_GET_WIFI_LIST:{
@@ -479,10 +552,27 @@ static void event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_param_t *par
     }
 }
 
-/*
- * 对外暴露的 Wi-Fi/BLUFI 初始化入口。
- * main/app_main 调用此函数后，设备会开始 BLUFI 广播，等待手机配网。
- */
+/* One-shot flag preserves local reprovisioning even with saved Wi-Fi.
+ * Reboot avoids racing BLE teardown; unrelated NVS data remains intact. */
+void wifi_reprovision(void)
+{
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open("wifi_boot", NVS_READWRITE, &handle);
+    if (err == ESP_OK) {
+        err = nvs_set_u8(handle, "force_blufi", 1);
+        if (err == ESP_OK) err = nvs_commit(handle);
+        nvs_close(handle);
+    }
+    if (err != ESP_OK) {
+        BLUFI_ERROR("Cannot request provisioning: %s\n", esp_err_to_name(err));
+        return;
+    }
+    BLUFI_INFO("Restarting into BLUFI provisioning by local request\n");
+    esp_restart();
+}
+
+static void blufi_boot_task(void *arg);
+
 void wifi_init(void)
 {
     esp_err_t ret;
@@ -495,8 +585,31 @@ void wifi_init(void)
     }
     ESP_ERROR_CHECK( ret );
 
-    initialise_wifi();
+    nvs_handle_t handle;
+    ESP_ERROR_CHECK(nvs_open("wifi_boot", NVS_READWRITE, &handle));
+    uint8_t forced = 0;
+    ret = nvs_get_u8(handle, "force_blufi", &forced);
+    if (ret != ESP_OK && ret != ESP_ERR_NVS_NOT_FOUND) ESP_ERROR_CHECK(ret);
+    force_provision = forced != 0;
+    if (force_provision) {
+        ESP_ERROR_CHECK(nvs_erase_key(handle, "force_blufi"));
+        ESP_ERROR_CHECK(nvs_commit(handle));
+    }
+    nvs_close(handle);
 
+    initialise_wifi();
+    ESP_ERROR_CHECK(xTaskCreate(wifi_recovery_task, "wifi_recovery", 3072, NULL, 5, NULL)
+                    == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
+    ESP_ERROR_CHECK(xTaskCreate(blufi_boot_task, "blufi_boot", 4096, NULL, 5, NULL)
+                    == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
+}
+
+static void start_blufi(void)
+{
+    /* Driver keeps the saved config for recovery; start a clean provisioning
+     * draft so an old password/BSSID cannot leak into a new network profile. */
+    memset(&sta_config, 0, sizeof(sta_config));
+    esp_err_t ret;
 #if CONFIG_BT_CONTROLLER_ENABLED || !CONFIG_BT_NIMBLE_ENABLED
     ret = esp_blufi_controller_init();
     if (ret) {
@@ -516,4 +629,27 @@ void wifi_init(void)
     ESP_ERROR_CHECK(task_created == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
 
     BLUFI_INFO("BLUFI VERSION %04x\n", esp_blufi_get_version());
+}
+
+static void blufi_boot_task(void *arg)
+{
+    (void)arg;
+    if (boot_with_saved_wifi) {
+        /* SHUTDOWN also latches success, even if Wi-Fi drops before we run. */
+        EventBits_t bits = xEventGroupWaitBits(wifi_event_group,
+            CONNECTED_BIT | BLE_SHUTDOWN_REQUESTED_BIT, pdFALSE, pdFALSE,
+            pdMS_TO_TICKS(SAVED_WIFI_TIMEOUT_MS));
+        if (bits & (CONNECTED_BIT | BLE_SHUTDOWN_REQUESTED_BIT)) {
+            BLUFI_INFO("Saved WiFi connected; BLE remains disabled\n");
+            vTaskDelete(NULL);
+            return;
+        }
+        BLUFI_INFO("Saved WiFi timed out after 30s; enabling BLUFI\n");
+    } else {
+        BLUFI_INFO("No saved WiFi or local provisioning requested; enabling BLUFI\n");
+    }
+    /* GOT_IP racing initialization sets SHUTDOWN and suppresses advertising;
+     * ble_shutdown_task handles teardown once initialization has completed. */
+    start_blufi();
+    vTaskDelete(NULL);
 }

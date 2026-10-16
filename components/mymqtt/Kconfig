@@ -1,0 +1,21 @@
+menu "Ingaway MQTT upload"
+    config INGAWAY_MQTT_BROKER_URI
+        string "MQTT TLS broker URI (mqtts://host, no port)"
+        default "mqtts://10.30.192.176"
+    config INGAWAY_MQTT_BROKER_PORT
+        int "MQTT TLS broker port"
+        range 1 65535
+        default 8883
+    config INGAWAY_MQTT_TOPIC_DATA
+        string "Telemetry publish topic"
+        default "env/telemetry"
+    config INGAWAY_MQTT_TOPIC_TEMP
+        string "Temperature publish topic (raw value or null)"
+        default "env/temp"
+    config INGAWAY_MQTT_TOPIC_HEARTBEAT
+        string "Heartbeat publish topic"
+        default "env/heartbeat"
+    config INGAWAY_MQTT_NTP_SERVER
+        string "NTP server for TLS certificate time validation"
+        default "pool.ntp.org"
+endmenu

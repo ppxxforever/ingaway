@@ -25,7 +25,6 @@
 #endif
 
 // 初始化控制器
-#if CONFIG_BT_CONTROLLER_ENABLED || !CONFIG_BT_NIMBLE_ENABLED
 esp_err_t esp_blufi_controller_init() {
     esp_err_t ret = ESP_OK;
 
@@ -43,10 +42,9 @@ esp_err_t esp_blufi_controller_init() {
     }
     return ret;
 }
-#endif
 
-// 反初始化控制器
-#if CONFIG_BT_CONTROLLER_ENABLED || !CONFIG_BT_NIMBLE_ENABLED
+
+
 esp_err_t esp_blufi_controller_deinit() {
     esp_err_t ret = ESP_OK;
     ret = esp_bt_controller_disable();
@@ -63,17 +61,14 @@ esp_err_t esp_blufi_controller_deinit() {
 
     return ret;
 }
-#endif
 
-#ifdef CONFIG_BT_NIMBLE_ENABLED
 void ble_store_config_init(void);
 static void blufi_on_reset(int reason)
 {
     MODLOG_DFLT(ERROR, "Resetting state; reason=%d\n", reason);
 }
 
-static void
-blufi_on_sync(void)
+static void blufi_on_sync(void)
 {
   esp_blufi_profile_init();
 }
@@ -106,20 +101,11 @@ esp_err_t esp_blufi_host_init(void)
      * Manager.  sm_mitm/sm_sc/sm_bonding are opt-in via Kconfig; Just Works
      * pairing is acceptable because the DH key exchange provides the security. */
     ble_hs_cfg.sm_io_cap = 4;
-#ifdef CONFIG_EXAMPLE_BONDING
-    ble_hs_cfg.sm_bonding = 1;
-#endif
-#ifdef CONFIG_EXAMPLE_MITM
-    ble_hs_cfg.sm_mitm = 1;
-#endif
+
 #ifdef CONFIG_EXAMPLE_USE_SC
     ble_hs_cfg.sm_sc = 1;
 #else
     ble_hs_cfg.sm_sc = 0;
-#ifdef CONFIG_EXAMPLE_BONDING
-    ble_hs_cfg.sm_our_key_dist = 1;
-    ble_hs_cfg.sm_their_key_dist = 1;
-#endif
 #endif
 
     int rc;
@@ -198,5 +184,4 @@ esp_err_t esp_blufi_host_and_cb_init(esp_blufi_callbacks_t *callbacks)
     return ret;
 }
 
-
-#endif /* CONFIG_BT_NIMBLE_ENABLED */
+/* CONFIG_BT_NIMBLE_ENABLED */

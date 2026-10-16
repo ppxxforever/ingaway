@@ -1,0 +1,31 @@
+menu "Ingaway Modbus acquisition"
+    comment "TCP connection timeout: Component config -> Modbus -> TCP connection timeout"
+    config INGAWAY_MB_POLL_INTERVAL_MS
+        int "Delay after a successful sample (ms)"
+        range 100 60000
+        default 2000
+    config INGAWAY_MB_RESPONSE_TIMEOUT_MS
+        int "Modbus response timeout (ms)"
+        range 100 5000
+        default 2000
+    config INGAWAY_MB_MAX_RETRIES
+        int "Additional attempts per acquisition round"
+        range 0 5
+        default 2
+    config INGAWAY_MB_RETRY_DELAY_MS
+        int "Delay between attempts (ms)"
+        range 100 5000
+        default 250
+    config INGAWAY_MB_BACKOFF_MIN_MS
+        int "Initial reconnect backoff (ms)"
+        range 100 60000
+        default 1000
+    config INGAWAY_MB_BACKOFF_MAX_MS
+        int "Maximum reconnect backoff (ms)"
+        range 100 300000
+        default 30000
+    config INGAWAY_MB_STALE_AFTER_MS
+        int "Maximum cached sample age (ms)"
+        range 100 300000
+        default 5000
+endmenu

@@ -24,4 +24,9 @@ config W25Q64_MISO_GPIO
     range 0 48
     default 13
 
+config STORAGE_LOG_MIN_LEVEL
+    int "Minimum persistent log level (0 Debug, 1 Info, 2 Warn, 3 Error)"
+    range 0 3
+    default 1
+
 endmenu

@@ -3,9 +3,13 @@
 #include "esp_err.h"
 #include "esp_event.h"
 #include "wifi.h"
-#include "environment.h"
+#include "interaction.h"
 #include "w25q64.h"
+#include "w25q64_cache.h"
+#include "storage_archive.h"
+
 #include "sdkconfig.h"
+
 
 static const char *TAG = "main";
 
@@ -39,14 +43,24 @@ void app_main(void)
     ESP_ERROR_CHECK(rc);       
 
 #ifdef CONFIG_W25Q64_ENABLED
-    ESP_LOGI(TAG, "Initializing external storage");
     esp_err_t storage_err = w25q64_init();
+    if (storage_err == ESP_OK) {
+        esp_err_t archive_err = storage_archive_start();
+        if (archive_err != ESP_OK) {
+            ESP_LOGW(TAG, "History/log service unavailable: %s", esp_err_to_name(archive_err));
+        }
+        storage_err = w25q64_cache_init();
+    }
     if (storage_err != ESP_OK) {
-        ESP_LOGW(TAG, "External storage unavailable: %s", esp_err_to_name(storage_err));
+        ESP_LOGW(TAG, "External cache unavailable (no auto-format): %s",
+                 esp_err_to_name(storage_err));
     }
 #endif
 
     ESP_LOGI(TAG, "Initializing wifi");
     wifi_init();
-    
+    esp_err_t ui_err = interaction_start();
+    if (ui_err != ESP_OK) {
+        ESP_LOGE(TAG, "Cannot start LCD interaction: %s", esp_err_to_name(ui_err));
+    }
 }
